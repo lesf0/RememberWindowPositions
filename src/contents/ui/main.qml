@@ -2023,7 +2023,7 @@ Item {
                     b: tileData.bottom
                 } : undefined,
                 o: client.mt_autoRestore ? client.mt_autoRestore : 0,
-                P: placements
+                P: convertPlacementsToSettings(placements)
             });
         }
 
