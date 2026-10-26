@@ -24,6 +24,11 @@ Item {
 
     property int restoreMode: 0
 
+    // Signature of the current display configuration (the set of connected
+    // outputs with their resolution and arrangement, e.g. laptop-only vs docked)
+    property string displayConfigKey: ""
+    property int maxStoredPlacements: 8
+
     function log(string) {
         if (!debugLogs) return;
         console.warn('RememberWindowPositions: ' + string);
@@ -79,6 +84,7 @@ Item {
         else if (config.appsNotBlacklisted) mode = 'All except blacklisted apps';
         else if (config.appsWhitelistedOnly) mode = 'Only whitelisted apps';
         log('Restoring: ' + mode + ' - minimumCaptionMatch: ' + config.minimumCaptionMatch + ' restoreWindowsWithoutCaption: ' + config.restoreWindowsWithoutCaption + ' restoreSize: ' + config.restoreSize + ' restoreMinimized: ' + config.restoreMinimized);
+        log('Multi-monitor: ' + config.multiMonitorType + ' - perDisplayConfigRestore: ' + config.perDisplayConfigRestore + ' perScreenRestore: ' + config.perScreenRestore + ' rememberOnlyScreenName: ' + config.rememberOnlyScreenName);
     }
 
     function stringListToArray(list) {
@@ -91,6 +97,117 @@ Item {
             }
         }
         return array;
+    }
+
+    function computeDisplayConfigKey() {
+        let screens = Workspace.screens;
+        let parts = [];
+        for (let i = 0; i < screens.length; i++) {
+            let screen = screens[i];
+            let geometry = screen.geometry;
+            parts.push(screen.name + '|' + (screen.serialNumber || '') + '|' + geometry.width + 'x' + geometry.height + '@' + geometry.x + ',' + geometry.y);
+        }
+        parts.sort();
+        return parts.join(';');
+    }
+
+    function updateDisplayConfigKey() {
+        let key = computeDisplayConfigKey();
+        if (key != displayConfigKey) {
+            log('Display configuration: ' + key);
+            displayConfigKey = key;
+        }
+    }
+
+    function getPlacementForSave(saveData) {
+        if (!saveData || !saveData.placements) return undefined;
+        return saveData.placements[displayConfigKey];
+    }
+
+    function getSavedSize(saveData) {
+        let placement = config.perDisplayConfigRestore ? getPlacementForSave(saveData) : undefined;
+        if (placement && placement.width != undefined && placement.height != undefined) {
+            return [placement.width, placement.height];
+        }
+        return [saveData.width, saveData.height];
+    }
+
+    function getSavedSizeMatch(saveData, client) {
+        let size = getSavedSize(saveData);
+        let matchingDimentions = 0;
+        if (size[0] == client.width) matchingDimentions++;
+        if (size[1] == client.height) matchingDimentions++;
+        return matchingDimentions;
+    }
+
+    function limitPlacements(placements) {
+        let keys = Object.keys(placements);
+        while (keys.length > maxStoredPlacements) {
+            let oldestKey = keys[0];
+            for (let i = 1; i < keys.length; i++) {
+                if ((placements[keys[i]].lastUsed || 0) < (placements[oldestKey].lastUsed || 0)) {
+                    oldestKey = keys[i];
+                }
+            }
+            delete placements[oldestKey];
+            keys = Object.keys(placements);
+        }
+    }
+
+    function convertPlacementsFromSettings(savedPlacements) {
+        let placements = {};
+        for (let key in savedPlacements) {
+            let saved = savedPlacements[key];
+            placements[key] = {
+                x            : saved.x,
+                y            : saved.y,
+                width        : saved.w,
+                height       : saved.h,
+                serialNumber : saved.s,
+                name         : saved.n,
+                lastUsed     : saved.u || 0,
+                tile         : saved.t ? {
+                    quick  : saved.t.q == 1,
+                    x      : saved.t.x,
+                    y      : saved.t.y,
+                    width  : saved.t.w,
+                    height : saved.t.h,
+                    left   : saved.t.l,
+                    right  : saved.t.r,
+                    top    : saved.t.t,
+                    bottom : saved.t.b
+                } : undefined
+            };
+        }
+        return placements;
+    }
+
+    function convertPlacementsToSettings(placements) {
+        let converted = {};
+        for (let key in placements) {
+            let placement = placements[key];
+            converted[key] = {
+                x : placement.x,
+                y : placement.y,
+                w : placement.width,
+                h : placement.height,
+                s : placement.serialNumber,
+                n : placement.name,
+                u : placement.lastUsed,
+                t : placement.tile ? {
+                    q : placement.tile.quick ? 1 : 0,
+                    x : placement.tile.x,
+                    y : placement.tile.y,
+                    w : placement.tile.width,
+                    h : placement.tile.height,
+                    l : placement.tile.left,
+                    r : placement.tile.right,
+                    t : placement.tile.top,
+                    b : placement.tile.bottom
+                } : undefined
+            };
+        }
+        return converted;
     }
 
     function stringListToNormalAndWildcard(list) {
@@ -221,6 +338,7 @@ Item {
         config.printAllWindows = config.printType == 1;
         config.perScreenRestore = config.multiMonitorType == 0 || config.multiMonitorType == 2;
         config.rememberOnlyScreenName = config.multiMonitorType == 2;
+        config.perDisplayConfigRestore = config.multiMonitorType == 3;
         config.multiWindowRestoreAttempts = config.loginBoost ? config.loginBoostMultiplier * config.multiWindowRestoreAttemptsDefault : config.multiWindowRestoreAttemptsDefault;
         config.perfectMultiWindowRestoreAttempts = config.loginBoost ? config.loginBoostMultiplier * config.perfectMultiWindowRestoreAttemptsDefault : config.perfectMultiWindowRestoreAttemptsDefault;
         config.loginOverride = true;
@@ -299,13 +417,9 @@ Item {
             if (score > highestScore) {
                 highestScore = score;
                 highestIndex = i;
-                matchingDimentions = 0;
-                if (windowData.saved[i].width == client.width) matchingDimentions++;
-                if (windowData.saved[i].height == client.height) matchingDimentions++;
+                matchingDimentions = getSavedSizeMatch(windowData.saved[i], client);
             } else if (score == highestScore && matchingDimentions < 2) {
-                var currentMatchingDimentions = 0;
-                if (windowData.saved[i].width == client.width) currentMatchingDimentions++;
-                if (windowData.saved[i].height == client.height) currentMatchingDimentions++;
+                var currentMatchingDimentions = getSavedSizeMatch(windowData.saved[i], client);
                 if (currentMatchingDimentions > matchingDimentions) {
                     highestIndex = i;
                     matchingDimentions = currentMatchingDimentions;
@@ -331,13 +445,9 @@ Item {
             if (score > highestScore) {
                 highestScore = score;
                 highestIndex = i;
-                matchingDimentions = 0;
-                if (windowData.saved[i].width == client.width) matchingDimentions++;
-                if (windowData.saved[i].height == client.height) matchingDimentions++;
+                matchingDimentions = getSavedSizeMatch(windowData.saved[i], client);
             } else if (score == highestScore && matchingDimentions < 2) {
-                var currentMatchingDimentions = 0;
-                if (windowData.saved[i].width == client.width) currentMatchingDimentions++;
-                if (windowData.saved[i].height == client.height) currentMatchingDimentions++;
+                var currentMatchingDimentions = getSavedSizeMatch(windowData.saved[i], client);
                 if (currentMatchingDimentions > matchingDimentions) {
                     highestIndex = i;
                     matchingDimentions = currentMatchingDimentions;
@@ -377,7 +487,7 @@ Item {
 
         if (serialNumberMatchIndex != -1) {
             return screens[serialNumberMatchIndex];
-        } else if (config.rememberOnlyScreenName && nameMatchIndex != -1) {
+        } else if ((config.rememberOnlyScreenName || config.perDisplayConfigRestore) && nameMatchIndex != -1) {
             return screens[nameMatchIndex];
         }
 
@@ -403,6 +513,7 @@ Item {
         if (client.rwp_restoreBlocked) return;
         if (captionScore < config.minimumCaptionMatch) return;
         if (!config.restoreWindowsWithoutCaption && (!client.caption || client.caption.trim().length == 0)) return;
+        updateDisplayConfigKey();
         let positionRestored = false;
         let sizeRestored = false;
         let virtualDesktopRestored = false;
@@ -454,22 +565,37 @@ Item {
             }
 
             // Restore frame geometry
-            if (config.perScreenRestore && saveData.position) {
+            // A placement saved for the current display configuration takes
+            // priority, then the legacy single save (relative to its output),
+            // then the last global position.
+            let perConfigPlacement;
+            if (config.perDisplayConfigRestore) {
+                perConfigPlacement = getPlacementForSave(saveData);
+            }
+            let placement = perConfigPlacement;
+            if (!placement && (config.perScreenRestore || config.perDisplayConfigRestore) && saveData.position) {
+                placement = saveData.position;
+            }
+            log('Restoring frame geometry from ' + (perConfigPlacement ? 'display configuration placement' : placement ? 'legacy placement' : 'global position'));
+            let savedWidth = placement && placement.width != undefined ? placement.width : saveData.width;
+            let savedHeight = placement && placement.height != undefined ? placement.height : saveData.height;
+
+            if (placement) {
                 log('Restoring frame geometry based on screen position');
-                let output = getOutputFromSave(saveData.position.serialNumber, saveData.position.name, client.resourceClass);
-                let positionGlobal = output != null ? output.mapToGlobal(Qt.point(saveData.position.x, saveData.position.y)) : client.pos;
+                let output = getOutputFromSave(placement.serialNumber, placement.name, client.resourceClass);
+                let positionGlobal = output != null ? output.mapToGlobal(Qt.point(placement.x, placement.y)) : client.pos;
                 log('- positionGlobal: ' + positionGlobal);
                 if (windowConfig.position && restoreSize) {
-                    if (client.x != positionGlobal.x || client.y != positionGlobal.y || client.width != saveData.width || client.height != saveData.height) {
+                    if (client.x != positionGlobal.x || client.y != positionGlobal.y || client.width != savedWidth || client.height != savedHeight) {
                         log('Attempting to restore window size and position');
                         positionRestored = client.x != positionGlobal.x || client.y != positionGlobal.y;
-                        sizeRestored = client.width != saveData.width || client.height != saveData.height;
-                        client.frameGeometry = Qt.rect(positionGlobal.x, positionGlobal.y, saveData.width, saveData.height);
+                        sizeRestored = client.width != savedWidth || client.height != savedHeight;
+                        client.frameGeometry = Qt.rect(positionGlobal.x, positionGlobal.y, savedWidth, savedHeight);
                     }
                 } else if (restoreSize) {
-                    if (client.width != saveData.width || client.height != saveData.height) {
+                    if (client.width != savedWidth || client.height != savedHeight) {
                         log('Attempting to restore window size');
-                        client.frameGeometry = Qt.rect(client.x, client.y, saveData.width, saveData.height);
+                        client.frameGeometry = Qt.rect(client.x, client.y, savedWidth, savedHeight);
                         sizeRestored = true;
                     }
                 } else if (windowConfig.position && (client.x != positionGlobal.x || client.y != positionGlobal.y)) {
@@ -480,16 +606,16 @@ Item {
             } else {
                 log('Restoring frame geometry based on global position');
                 if (windowConfig.position && restoreSize) {
-                    if (client.x != saveData.x || client.y != saveData.y || client.width != saveData.width || client.height != saveData.height) {
+                    if (client.x != saveData.x || client.y != saveData.y || client.width != savedWidth || client.height != savedHeight) {
                         log('Attempting to restore window size and position');
                         positionRestored = client.x != saveData.x || client.y != saveData.y;
-                        sizeRestored = client.width != saveData.width || client.height != saveData.height;
-                        client.frameGeometry = Qt.rect(saveData.x, saveData.y, saveData.width, saveData.height);
+                        sizeRestored = client.width != savedWidth || client.height != savedHeight;
+                        client.frameGeometry = Qt.rect(saveData.x, saveData.y, savedWidth, savedHeight);
                     }
                 } else if (restoreSize) {
-                    if (client.width != saveData.width || client.height != saveData.height) {
+                    if (client.width != savedWidth || client.height != savedHeight) {
                         log('Attempting to restore window size');
-                        client.frameGeometry = Qt.rect(client.x, client.y, saveData.width, saveData.height);
+                        client.frameGeometry = Qt.rect(client.x, client.y, savedWidth, savedHeight);
                         sizeRestored = true;
                     }
                 } else if (windowConfig.position && (client.x != saveData.x || client.y != saveData.y)) {
@@ -580,8 +706,8 @@ Item {
                 keepBelowRestored = true;
             }
 
-            if (saveData.tile && config.restoreTile && (!client.tile || config.restoreResizedQuickTile)) {
-                let tile = saveData.tile;
+            let tile = config.perDisplayConfigRestore ? (placement && placement.tile ? placement.tile : undefined) : saveData.tile;
+            if (tile && config.restoreTile && (!client.tile || config.restoreResizedQuickTile)) {
                 log('Attemptying to restore tile: ' + JSON.stringify(tile));
                 if (tile.quick && config.restoreResizedQuickTile || Math.ceil(client.frameGeometry.x) >= Math.floor(tile.x) && Math.ceil(client.frameGeometry.y) >= Math.floor(tile.y) && Math.floor(client.frameGeometry.x + client.frameGeometry.width) <= Math.ceil(tile.x + tile.width) && Math.floor(client.frameGeometry.y + client.frameGeometry.height) <= Math.ceil(tile.y + tile.height)) {
                     if (tile.quick) {
@@ -764,9 +890,10 @@ Item {
             for (let saveIndex = 0; saveIndex < windowData.saved.length; saveIndex++) {
                 let saved = windowData.saved[saveIndex];
                 if (saved.alreadyMatched) continue; // Already matched
+                let savedSize = getSavedSize(saved);
                 let matchingDimentions = 0;
-                if (saved.width == loading.width) matchingDimentions++;
-                if (saved.height == loading.height || confidence.allowHeightShrinking && Math.abs(saved.height - loading.height) < 60) matchingDimentions++;
+                if (savedSize[0] == loading.width) matchingDimentions++;
+                if (savedSize[1] == loading.height || confidence.allowHeightShrinking && Math.abs(savedSize[1] - loading.height) < 60) matchingDimentions++;
                 if (matchingDimentions < confidence.matchingDimentions) continue;
                 let captionScore = config.ignoreNumbers ? matchCaptionIgnoreNumbers(saved.caption, loading.caption) : matchCaption(saved.caption, loading.caption);
                 if (captionScore < confidence.caption) continue;
@@ -794,9 +921,10 @@ Item {
                 for (let loadingReverseMatchIndex = 0; loadingReverseMatchIndex < windowData.loading.length; loadingReverseMatchIndex++) {
                     let loading = windowData.loading[loadingReverseMatchIndex];
                     if (loading.rwp_save) continue; // Already matched
+                    let savedSize = getSavedSize(saved);
                     let matchingDimentions = 0;
-                    if (saved.width == loading.width) matchingDimentions++;
-                    if (saved.height == loading.height || confidence.allowHeightShrinking && Math.abs(saved.height - loading.height) < 60) matchingDimentions++;
+                    if (savedSize[0] == loading.width) matchingDimentions++;
+                    if (savedSize[1] == loading.height || confidence.allowHeightShrinking && Math.abs(savedSize[1] - loading.height) < 60) matchingDimentions++;
                     if (matchingDimentions < confidence.matchingDimentions) continue;
                     let captionScore = config.ignoreNumbers ? matchCaptionIgnoreNumbers(saved.caption, loading.caption) : matchCaption(saved.caption, loading.caption);
                     if (captionScore < confidence.caption) continue;
@@ -834,6 +962,7 @@ Item {
     }
 
     function restoreWindowsBasedOnConfidence(clientName, expectedConfidence, minConfidence, repeats) {
+        updateDisplayConfigKey();
         let windowData = config.windows[clientName];
         logE('Timeout restore for client: ' + clientName + ' loading count: ' + windowData.loading.length + ' expectedConfidence: ' + expectedConfidence + ' minConfidence: ' + minConfidence + ' repeats: ' + repeats);
 
@@ -878,6 +1007,7 @@ Item {
 
             for (let i = 0; i < results.length; i++) {
                 restoreWindowPlacement(results[i].saved, results[i].loading, results[i].captionScore, getCurrentConfig(results[i].loading));
+                results[i].loading.rwp_save = results[i].saved;
                 if (!results[i].loading.minimized) {
                     validRestoredWindow = results[i].loading;
                 }
@@ -994,6 +1124,7 @@ Item {
     function addWindow(client, restore) {
         if (!isValidWindow(client)) return;
 
+        updateDisplayConfigKey();
         switch (restoreMode) {
             case 1: // Block restoration of next window only
                 restoreMode = 0;
@@ -1215,6 +1346,7 @@ Item {
 
         let windowData = config.windows[client.resourceClass];
         let currentConfig = getCurrentConfig(client);
+        updateDisplayConfigKey();
 
         log('Removing window for client: ' + client.resourceClass);
         log(' - internalId: ' + client.internalId);
@@ -1232,6 +1364,23 @@ Item {
 
             let currentWindowOrder = windowData.windowOrder.indexOf(client.internalId);
             let convertedPosition = client.output.mapFromGlobal(client.pos);
+            let tile = convertTileData(client);
+            let placement = {
+                x            : convertedPosition.x,
+                y            : convertedPosition.y,
+                width        : client.width,
+                height       : client.height,
+                serialNumber : client.output.serialNumber,
+                name         : client.output.name,
+                tile         : tile,
+                lastUsed     : Date.now()
+            };
+            // Carry over placements remembered for other display configurations
+            let previousSave = client.rwp_save ? client.rwp_save : windowData.saved.find((s) => s.caption == client.caption.toString());
+            let placements = previousSave && previousSave.placements ? Object.assign({}, previousSave.placements) : {};
+            placements[displayConfigKey] = placement;
+            limitPlacements(placements);
+            log('Saving placement for display configuration: ' + displayConfigKey);
 
             let currentWindowData = {
                 internalId     : client.internalId,
@@ -1259,8 +1408,9 @@ Item {
                 },
                 sessionRestore : false,
                 alreadyMatched : false,
-                tile           : convertTileData(client),
-                mouseTilerAuto : (client.mt_autoRestore ? client.mt_autoRestore : 0)
+                tile           : tile,
+                mouseTilerAuto : (client.mt_autoRestore ? client.mt_autoRestore : 0),
+                placements     : placements
             };
 
             if (debugLogs && client.tile) {
@@ -1619,7 +1769,8 @@ Item {
                         top          : save.t.t,      // top
                         bottom       : save.t.b       // bottom
                     } : undefined,
-                    mouseTilerAuto   : save.o         // mouseTilerAuto
+                    mouseTilerAuto   : save.o,        // mouseTilerAuto
+                    placements       : save.P ? convertPlacementsFromSettings(save.P) : {}
                     // --- Omitted fields ---
                     // closeTime     :                // closeTime
                     // internalId    : save.i         // internalId
@@ -1695,7 +1846,8 @@ Item {
                                 top          : save.t.t,
                                 bottom       : save.t.b
                             } : undefined,
-                            mouseTilerAuto   : save.o
+                            mouseTilerAuto   : save.o,
+                            placements       : save.P ? convertPlacementsFromSettings(save.P) : {}
                         });
                     }
 
@@ -1782,7 +1934,8 @@ Item {
                             t: save.tile.top,              // top
                             b: save.tile.bottom            // bottom
                         } : undefined,
-                        o: save.mouseTilerAuto             // mouseTilerAuto
+                        o: save.mouseTilerAuto,            // mouseTilerAuto
+                        P: save.placements && Object.keys(save.placements).length > 0 ? convertPlacementsToSettings(save.placements) : undefined
                         // --- Omitted fields ---
                         //  : save.closeTime               // closeTime
                         // i: save.internalId              // internalId
@@ -1822,6 +1975,20 @@ Item {
 
             let convertedPosition = client.output.mapFromGlobal(client.pos);
             let tileData = convertTileData(client);
+            let placement = {
+                x            : convertedPosition.x,
+                y            : convertedPosition.y,
+                width        : client.width,
+                height       : client.height,
+                serialNumber : client.output.serialNumber,
+                name         : client.output.name,
+                tile         : tileData,
+                lastUsed     : Date.now()
+            };
+            let previousSave = client.rwp_save ? client.rwp_save : (config.windows[name] && config.windows[name].saved ? config.windows[name].saved.find((s) => s.caption == client.caption.toString()) : undefined);
+            let placements = previousSave && previousSave.placements ? Object.assign({}, previousSave.placements) : {};
+            placements[displayConfigKey] = placement;
+            limitPlacements(placements);
             liveData[name].s.push({
                 c: client.caption.toString(),
                 x: client.x,
@@ -1855,7 +2022,8 @@ Item {
                     t: tileData.top,
                     b: tileData.bottom
                 } : undefined,
-                o: client.mt_autoRestore ? client.mt_autoRestore : 0
+                o: client.mt_autoRestore ? client.mt_autoRestore : 0,
+                P: placements
             });
         }
 
@@ -2070,6 +2238,10 @@ Item {
         function onWindowActivated(client) {
             onActivateWindow(client);
         }
+
+        function onScreensChanged() {
+            updateDisplayConfigKey();
+        }
     }
 
     Component.onCompleted: {
@@ -2078,6 +2250,7 @@ Item {
         log('Loaded...');
         cacheWindowOrder();
         loadConfig();
+        updateDisplayConfigKey();
         loadOverridesFromSettings();
         loadWindowsFromSettings();
         addDefaultOverrides();
