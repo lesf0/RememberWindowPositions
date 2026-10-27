@@ -210,6 +210,20 @@ Item {
         return converted;
     }
 
+    function parseLiveBackups() {
+        try {
+            return JSON.parse(settings.rememberwindowpositions_liveBackups || "{}");
+        } catch (e) {
+            logE('Failed to parse live backups');
+            return {};
+        }
+    }
+
+    function findLiveBackupWindow(liveBackups, name, caption) {
+        let app = liveBackups[name];
+        return app && app.s ? app.s.find((s) => s.c == caption) : undefined;
+    }
+
     function stringListToNormalAndWildcard(list) {
         let output = {
             normal: [],
@@ -1375,9 +1389,14 @@ Item {
                 tile         : tile,
                 lastUsed     : Date.now()
             };
-            // Carry over placements remembered for other display configurations
+            // Carry over placements remembered for other display configurations,
+            // including configurations seen only in live backups.
             let previousSave = client.rwp_save ? client.rwp_save : windowData.saved.find((s) => s.caption == client.caption.toString());
             let placements = previousSave && previousSave.placements ? Object.assign({}, previousSave.placements) : {};
+            let previousLiveWindow = findLiveBackupWindow(parseLiveBackups(), client.resourceClass, client.caption.toString());
+            if (previousLiveWindow && previousLiveWindow.P) {
+                Object.assign(placements, convertPlacementsFromSettings(previousLiveWindow.P));
+            }
             placements[displayConfigKey] = placement;
             limitPlacements(placements);
             log('Saving placement for display configuration: ' + displayConfigKey);
@@ -1954,6 +1973,7 @@ Item {
     function saveLiveBackup() {
         if (config.liveBackupInterval <= 0) return;
         let liveData = {};
+        let previousLiveBackups = parseLiveBackups();
         const clients = Workspace.stackingOrder;
         for (let i = 0; i < clients.length; i++) {
             let client = clients[i];
@@ -1987,6 +2007,12 @@ Item {
             };
             let previousSave = client.rwp_save ? client.rwp_save : (config.windows[name] && config.windows[name].saved ? config.windows[name].saved.find((s) => s.caption == client.caption.toString()) : undefined);
             let placements = previousSave && previousSave.placements ? Object.assign({}, previousSave.placements) : {};
+            // Retain configurations seen in earlier live backups, even if the
+            // window was never closed in them.
+            let previousLiveWindow = findLiveBackupWindow(previousLiveBackups, name, client.caption.toString());
+            if (previousLiveWindow && previousLiveWindow.P) {
+                Object.assign(placements, convertPlacementsFromSettings(previousLiveWindow.P));
+            }
             placements[displayConfigKey] = placement;
             limitPlacements(placements);
             liveData[name].s.push({
