@@ -28,6 +28,7 @@ Item {
     // outputs with their resolution and arrangement, e.g. laptop-only vs docked)
     property string displayConfigKey: ""
     property int maxStoredPlacements: 8
+    property bool shuttingDown: false
 
     function log(string) {
         if (!debugLogs) return;
@@ -151,6 +152,110 @@ Item {
             }
             delete placements[oldestKey];
             keys = Object.keys(placements);
+        }
+    }
+
+    function getScreensBoundingRect() {
+        let screens = Workspace.screens;
+        if (screens.length == 0) return null;
+        let left = screens[0].geometry.x;
+        let top = screens[0].geometry.y;
+        let right = left + screens[0].geometry.width;
+        let bottom = top + screens[0].geometry.height;
+        for (let i = 1; i < screens.length; i++) {
+            let geometry = screens[i].geometry;
+            left = Math.min(left, geometry.x);
+            top = Math.min(top, geometry.y);
+            right = Math.max(right, geometry.x + geometry.width);
+            bottom = Math.max(bottom, geometry.y + geometry.height);
+        }
+        return Qt.rect(left, top, right - left, bottom - top);
+    }
+
+    function isClientWithinScreens(client) {
+        let bounds = getScreensBoundingRect();
+        if (!bounds) return true;
+        let frame = client.frameGeometry;
+        return frame.x >= bounds.x && frame.y >= bounds.y && frame.x + frame.width <= bounds.x + bounds.width && frame.y + frame.height <= bounds.y + bounds.height;
+    }
+
+    function getTargetScreenForClient(client) {
+        let screens = Workspace.screens;
+        let frame = client.frameGeometry;
+        let best = null;
+        let bestArea = 0;
+        for (let i = 0; i < screens.length; i++) {
+            let geometry = screens[i].geometry;
+            let width = Math.min(frame.x + frame.width, geometry.x + geometry.width) - Math.max(frame.x, geometry.x);
+            let height = Math.min(frame.y + frame.height, geometry.y + geometry.height) - Math.max(frame.y, geometry.y);
+            let area = width > 0 && height > 0 ? width * height : 0;
+            if (area > bestArea) {
+                bestArea = area;
+                best = screens[i];
+            }
+        }
+        if (best) return best;
+        if (Workspace.activeScreen) return Workspace.activeScreen;
+        return screens.length > 0 ? screens[0] : null;
+    }
+
+    function clampClientToScreen(client, screen) {
+        let geometry = screen.geometry;
+        let frame = client.frameGeometry;
+        let width = Math.min(frame.width, geometry.width);
+        let height = Math.min(frame.height, geometry.height);
+        let x = Math.max(geometry.x, Math.min(frame.x, geometry.x + geometry.width - width));
+        let y = Math.max(geometry.y, Math.min(frame.y, geometry.y + geometry.height - height));
+        if (frame.x != x || frame.y != y || frame.width != width || frame.height != height) {
+            client.frameGeometry = Qt.rect(x, y, width, height);
+        }
+    }
+
+    function getPlacementFromClient(client) {
+        if (!config.perDisplayConfigRestore) return undefined;
+        if (client.rwp_save && client.rwp_save.placements) {
+            let placement = client.rwp_save.placements[displayConfigKey];
+            if (placement) return placement;
+        }
+        let liveWindow = findLiveBackupWindow(parseLiveBackups(), client.resourceClass, client.caption.toString());
+        if (liveWindow && liveWindow.P) {
+            return convertPlacementsFromSettings(liveWindow.P)[displayConfigKey];
+        }
+        return undefined;
+    }
+
+    function applyPlacementsForCurrentConfig() {
+        if (!config.perDisplayConfigRestore) return;
+        updateDisplayConfigKey();
+        let clients = Workspace.stackingOrder;
+        for (let i = 0; i < clients.length; i++) {
+            let client = clients[i];
+            if (!isValidWindow(client)) continue;
+            if (client.rwp_restoreBlocked) continue;
+            let windowConfig = getCurrentConfig(client);
+            if (windowConfig.blocked || windowConfig.rememberNever) continue;
+
+            let applied = false;
+            let placement = getPlacementFromClient(client);
+            if (placement && placement.width && placement.height) {
+                let output = getOutputFromSave(placement.serialNumber, placement.name);
+                if (output) {
+                    let global = output.mapToGlobal(Qt.point(placement.x, placement.y));
+                    client.frameGeometry = Qt.rect(global.x, global.y, placement.width, placement.height);
+                    applied = true;
+                    log('Applied placement for ' + client.resourceClass + ' in configuration: ' + displayConfigKey);
+                }
+            }
+            if (!applied) {
+                log('No placement for ' + client.resourceClass + ' in configuration: ' + displayConfigKey);
+            }
+            if (!isClientWithinScreens(client)) {
+                let screen = getTargetScreenForClient(client);
+                if (screen) {
+                    log('Clamping ' + client.resourceClass + ' to active screen');
+                    clampClientToScreen(client, screen);
+                }
+            }
         }
     }
 
@@ -792,6 +897,15 @@ Item {
                     log('Unable to restore tile position: ' + JSON.stringify(client.frameGeometry) + ' ' + JSON.stringify(tile));
                 }
             }
+
+            // Do not leave the window outside the current screens.
+            if (config.perDisplayConfigRestore && !isClientWithinScreens(client)) {
+                log('Clamping window to the active screen');
+                let screen = getTargetScreenForClient(client);
+                if (screen) {
+                    clampClientToScreen(client, screen);
+                }
+            }
         }
 
         logE(client.resourceClass + ' restored - z: ' + zRestored + ' positon: ' + positionRestored + ' size: ' + sizeRestored + ' desktop: ' + virtualDesktopRestored + ' minimized: ' + minimizedRestored + ' keepAbove: ' + keepAboveRestored + ' keepBelow: ' + keepBelowRestored + ' noBorder: ' + noBorderRestored + ' caption score: ' + captionScore + ' internalId: ' + client.internalId);
@@ -1397,7 +1511,11 @@ Item {
             if (previousLiveWindow && previousLiveWindow.P) {
                 Object.assign(placements, convertPlacementsFromSettings(previousLiveWindow.P));
             }
-            placements[displayConfigKey] = placement;
+            if (isClientWithinScreens(client)) {
+                placements[displayConfigKey] = placement;
+            } else {
+                log('Skipping off-screen placement for ' + displayConfigKey);
+            }
             limitPlacements(placements);
             log('Saving placement for display configuration: ' + displayConfigKey);
 
@@ -1552,6 +1670,15 @@ Item {
         repeat: true
         running: false
         onTriggered: saveLiveBackup()
+    }
+
+    Timer {
+        id: displayConfigApplyTimer
+
+        repeat: false
+        running: false
+        interval: 1000
+        onTriggered: applyPlacementsForCurrentConfig()
     }
 
     Timer {
@@ -2013,7 +2140,11 @@ Item {
             if (previousLiveWindow && previousLiveWindow.P) {
                 Object.assign(placements, convertPlacementsFromSettings(previousLiveWindow.P));
             }
-            placements[displayConfigKey] = placement;
+            if (shuttingDown || isClientWithinScreens(client)) {
+                placements[displayConfigKey] = placement;
+            } else {
+                log('Skipping off-screen live placement for ' + displayConfigKey);
+            }
             limitPlacements(placements);
             liveData[name].s.push({
                 c: client.caption.toString(),
@@ -2267,6 +2398,9 @@ Item {
 
         function onScreensChanged() {
             updateDisplayConfigKey();
+            if (config.perDisplayConfigRestore) {
+                displayConfigApplyTimer.restart();
+            }
         }
     }
 
@@ -2309,6 +2443,7 @@ Item {
 
     Component.onDestruction: {
         log('Closing...');
+        shuttingDown = true;
         updateSessionRestoreSaves();
         saveLiveBackup();
         saveWindowsToSettings(true);
