@@ -27,6 +27,7 @@ Item {
     // Signature of the current display configuration (the set of connected
     // outputs with their resolution and arrangement, e.g. laptop-only vs docked)
     property string displayConfigKey: ""
+    property string appliedConfigKey: ""
     property int maxStoredPlacements: 8
     property bool shuttingDown: false
 
@@ -257,6 +258,7 @@ Item {
                 }
             }
         }
+        appliedConfigKey = displayConfigKey;
     }
 
     function convertPlacementsFromSettings(savedPlacements) {
@@ -1682,6 +1684,21 @@ Item {
     }
 
     Timer {
+        id: displayConfigWatchTimer
+
+        repeat: true
+        running: true
+        interval: 2000
+        onTriggered: {
+            let previousKey = displayConfigKey;
+            updateDisplayConfigKey();
+            if (displayConfigKey != previousKey && config.perDisplayConfigRestore) {
+                displayConfigApplyTimer.restart();
+            }
+        }
+    }
+
+    Timer {
         id: disableRestorationTimer
 
         repeat: false
@@ -2120,6 +2137,12 @@ Item {
 
     function saveLiveBackup() {
         if (config.liveBackupInterval <= 0) return;
+        if (!shuttingDown) {
+            updateDisplayConfigKey();
+            if (config.perDisplayConfigRestore && displayConfigKey != appliedConfigKey) {
+                applyPlacementsForCurrentConfig();
+            }
+        }
         let liveData = {};
         let previousLiveBackups = parseLiveBackups();
         const clients = Workspace.stackingOrder;
@@ -2432,6 +2455,7 @@ Item {
         cacheWindowOrder();
         loadConfig();
         updateDisplayConfigKey();
+        appliedConfigKey = displayConfigKey;
         loadOverridesFromSettings();
         loadWindowsFromSettings();
         addDefaultOverrides();
