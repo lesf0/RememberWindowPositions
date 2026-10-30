@@ -2091,6 +2091,27 @@ Item {
             }
         }
 
+        // On shutdown, include the currently open windows from the live
+        // backup so their layouts are stored durably before the script exits.
+        if (shutdown && config.perDisplayConfigRestore) {
+            let liveBackups = parseLiveBackups();
+            let liveTimestamp = 0;
+            try {
+                liveTimestamp = JSON.parse(settings.rememberwindowpositions_liveBackupsExtras || "{}").lastAccessTime || 0;
+            } catch (e) {
+                logE('Failed to parse live backup timestamp');
+            }
+            for (let app in liveBackups) {
+                let liveApp = liveBackups[app];
+                if (!liveApp.s || liveApp.s.length == 0) continue;
+                convertedWindows[app] = {
+                    s: liveApp.s,
+                    l: Math.max(liveTimestamp, convertedWindows[app] ? convertedWindows[app].l : 0),
+                    w: liveApp.w || liveApp.s.length
+                };
+            }
+        }
+
         // log('Save - converted windows: ' + JSON.stringify(convertedWindows));
         log('Attempting to save windows...');
         settings.rememberwindowpositions_windows = JSON.stringify(convertedWindows);
